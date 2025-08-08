@@ -180,6 +180,9 @@ if __name__ == "__main__":
     # 加载动态得分字典
     print("Loading dynamic scores...")
     score_dict = load_dynamic_scores(score_file)
+    if len(score_dict) == 0:
+        print("No scores found in the file, exiting.")
+        exit(1)
     scores = list(score_dict.values())
     slope_scores = []
     for score in scores:
@@ -189,6 +192,9 @@ if __name__ == "__main__":
     Y = np.array(slope_scores)
     knee = KneeLocator(X, Y, curve="convex", direction="decreasing")
     knee_index = knee.knee
+    if knee_index is None:
+        print("No knee point found, using the last score as threshold")
+        knee_index = len(slope_scores) - 1
     threshold = slope_scores[knee_index]
     print(f"Knee point found at index {knee_index} with score {threshold:.4f}")
     

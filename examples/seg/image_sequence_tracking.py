@@ -29,7 +29,6 @@ def parse_args():
     parser.add_argument('--device', type=str, default='cpu', help='运行设备，cpu或cuda')
     parser.add_argument('--save-vid', action='store_true', help='是否保存为视频')
     parser.add_argument('--vid-fps', type=int, default=15, help='视频帧率')
-    parser.add_argument('--no-show', action='store_true', help='不显示处理过程')
     parser.add_argument('--save-npy', action='store_true', help='保存跟踪结果为npy文件')
     parser.add_argument('--npy-path', type=str, default='npy_masks', help='npy文件保存路径')
     return parser.parse_args()
@@ -107,6 +106,7 @@ def main():
     
     # 按文件名排序
     image_files = sorted(image_files)
+    base_names = [f.name.split('.')[0] for f in image_files]
     
     if not image_files:
         print(f"在 {args.source} 中未找到图片文件")
@@ -223,8 +223,6 @@ def main():
                         # 将当前对象的ID填入掩码对应区域
                         track_mask[binary_mask == 1] = track_id
                         
-
-                    
                     # 将掩码颜色与图像混合
                     im[binary_mask == 1] = im[binary_mask == 1] * 0.5 + np.array(color) * 0.5
                 
@@ -240,7 +238,7 @@ def main():
         
         # 保存跟踪掩码为npy文件
         if args.save_npy:
-            npy_file_path = npy_path / f"mask_{idx:04d}.npy"
+            npy_file_path = npy_path / f"{base_names[idx]}.npy"
             np.save(str(npy_file_path), track_mask)
             
             # 可视化跟踪掩码并保存为图像
@@ -269,22 +267,13 @@ def main():
         # 添加到视频
         if args.save_vid and video_writer is not None:
             video_writer.write(im)
-        
-        # 显示图像
-        if not args.no_show:
-            cv2.imshow('分割跟踪', im)
-            
-            # 按下q或空格键退出
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord(' ') or key == ord('q'):
-                break
     
     # 清理
     if video_writer is not None:
         video_writer.release()
     
     cv2.destroyAllWindows()
-    print(f"处理完成。结果保存在 {output_path}")
+    print(f"处理完成。彩色结果保存在 {output_path}, npy掩码保存在 {npy_path}。")
 
 
 if __name__ == "__main__":

@@ -37,7 +37,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="图片对分割跟踪")
     parser.add_argument('--source', type=str, required=True, help='图片文件夹路径')
     parser.add_argument('--all_seq_mask_path', type=str, required=True, help='GT掩码文件夹路径')
-    parser.add_argument('--calib_path', type=str,  required=True, help='相机内参文件路径')
+    parser.add_argument('--start_frame', type=int, default=0, help='开始处理的帧编号')
+    parser.add_argument('--cam', type=int, default=0, help='相机编号')
     parser.add_argument('--output', type=str, default='output_pairs', help='输出文件夹路径')
     parser.add_argument('--reid-weights', type=str, default='osnet_x0_25_msmt17.pt', help='ReID模型权重路径')
     parser.add_argument('--conf-thres', type=float, default=0.9, help='置信度阈值')
@@ -53,7 +54,7 @@ def get_color(track_id):
     return tuple(np.random.randint(0, 255, 3).tolist())
 
 
-def find_image_pairs(source_path):
+def find_image_pairs(source_path,cam_id):
     """查找所有的图片对
     
     Args:
@@ -66,20 +67,21 @@ def find_image_pairs(source_path):
     pairs = []
     
     # 查找所有gt图片
-    print(f"在 {source_path} 中查找GT图片...")
+    print(f"在 {source_path} 中查找cam{cam_id}图片...")
     gt_pattern = re.compile(r'gt_(\d+)_cam(\d+)\.png')
     gt_files = list(source_path.glob('gt_*_cam*.png'))
-    print(f"找到 {len(gt_files)} 个GT图片")
     
     for gt_file in gt_files:
         match = gt_pattern.match(gt_file.name)
         if match:
-            frame_id, cam_id = match.groups()
-            
-            # 查找对应的wrap图片
-            wrap_file = source_path / f'wrap_{frame_id}_cam{cam_id}.png'
-            if wrap_file.exists():
-                pairs.append((gt_file, wrap_file, frame_id, cam_id))
+            frame_id, cam = match.groups()
+            if int(cam) == int(cam_id):
+                # 查找对应的wrap图片
+                wrap_file = source_path / f'wrap_{frame_id}_cam{cam_id}.png'
+                if wrap_file.exists():
+                    pairs.append((gt_file, wrap_file, frame_id, cam_id))
+        
+    print(f"找到 {len(pairs)} 对图片")
     
     return sorted(pairs, key=lambda x: (int(x[2]), int(x[3])))  # 按frame_id和cam_id排序
 
@@ -506,7 +508,6 @@ def load_intrinsic_matrix(all_calib_path):
 def main():
     """主函数"""
     args = parse_args()
-    load_intrinsic_matrix(args.calib_path)
     
     # 创建输出目录
     output_path = Path(args.output)
@@ -521,14 +522,15 @@ def main():
         device = torch.device(args.device)
     
 
-    model_configs = {
-        'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
-        'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
-        'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
-        'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
-    }
+#     model_configs = {
+#         'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
+#         'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
+#         'vitl': {'encoder': 'vitl', 'featu(es': 256, 'out_channels'
+# : [256, 512, 1024, 1024]},
+#         'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
+#     }
 
-    encoder = 'vitl' # or 'vits', 'vitb', 'vitg'
+#     encoder = 'vitl' # or 'vits', 'vitb', 'vitg'
 
     # depth_model = DepthAnythingV2(**model_configs[encoder])
     # depth_model.load_state_dict(torch.load(f'/Depth-Anything-V2/checkpoints/depth_anything_v2_{encoder}.pth', map_location='cpu'))
@@ -553,7 +555,7 @@ def main():
     
     for wrap_dir in mapping_list:
         # wrap_dir = "wrap_*"
-        image_pairs = find_image_pairs(os.path.join(args.source, wrap_dir))[:2]
+        image_pairs = find_image_pairs(os.path.join(args.source, wrap_dir),args.cam)
         # N * (gt_path, wrap_path, frame_id, cam_id)
         
         if not image_pairs:
@@ -602,10 +604,10 @@ def main():
             # 过滤小边界框
             wrap_tracks_filtered = filter_small_bboxes(wrap_tracks, args.min_bbox_area)
             
-            # 根据类别平均面积进一步过滤
-            if len(wrap_tracks_filtered) > 0:
-                print(f"Wrap帧跟踪结果过滤:")
-                wrap_tracks_filtered = filter_by_class_average_area(wrap_tracks_filtered, threshold_ratio=0.5)
+            # # 根据类别平均面积进一步过滤
+            # if len(wrap_tracks_filtered) > 0:
+            #     print(f"Wrap帧跟踪结果过滤:")
+            #     wrap_tracks_filtered = filter_by_class_average_area(wrap_tracks_filtered, threshold_ratio=0.5)
             
             wrap_track_mask, wrap_track_info = create_tracking_mask(wrap_tracks_filtered, wrap_masks, wrap_image.shape)
             
@@ -689,6 +691,7 @@ def main():
             # ID matching
             seq_mask_paths = os.listdir(args.all_seq_mask_path)
             seq_mask_paths = sorted([p for p in seq_mask_paths if p.endswith('.npy')])
+            seq_mask_paths = seq_mask_paths[args.start_frame:]
             seq_mask_path = seq_mask_paths[int(frame_id)]
             print(f"Matching wrap_{frame_id} back to seq_mask: {seq_mask_path}")
             # 创建ID映射
@@ -783,11 +786,10 @@ def main():
 
        
 
-        
-
     print(f"\n================= 最终ID得分 =================")
     final_scores = []  # 存储最终得分列表
     for track_id, score in sorted(seq_ID_score.items()):
+        # 至少被观测到6次以上
         if seq_ID_score_count.get(track_id, 1) > 6:
             final_scores.append((track_id, score / seq_ID_score_count.get(track_id, 1)))
     final_scores.sort(key=lambda x: x[1], reverse=True)
