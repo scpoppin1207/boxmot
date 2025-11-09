@@ -18,6 +18,44 @@ from tqdm import tqdm
 
 from boxmot import BotSort
 
+from detectron2.engine import DefaultPredictor
+from detectron2.config import get_cfg
+from detectron2 import model_zoo
+
+def build_predictor(model_yaml="COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml", score_thresh=0.5, device="cuda"):
+    cfg = get_cfg()
+    cfg.merge_from_file(model_zoo.get_config_file(model_yaml))
+    # cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url(model_yaml)
+    cfg.MODEL.WEIGHTS = "/home/scp_recon/thirdparty/detectron2/weights/model_final_a3ec72.pkl"  # 自定义权重路径
+    cfg.MODEL.DEVICE = device
+    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = score_thresh
+    predictor = DefaultPredictor(cfg)
+    return predictor
+
+def detect_and_pack(predictor, bgr_image):
+    outputs = predictor(bgr_image)            # detectron2 Results
+    instances = outputs["instances"].to("cpu")
+    boxes = instances.pred_boxes.tensor.numpy() if instances.has("pred_boxes") else np.zeros((0,4))
+    labels = instances.pred_classes.numpy() if instances.has("pred_classes") else np.zeros((0,), dtype=int)
+    scores = instances.scores.numpy() if instances.has("scores") else np.zeros((0,))
+    # masks: boolean array (N, H, W) - aligned to original image size
+    if instances.has("pred_masks"):
+        masks = instances.pred_masks.numpy()  # bool (N, H, W)
+        # convert to torchvision style: (N,1,H,W) uint8
+        masks_torchvision = (masks.astype("uint8")[:, None, :, :])  # shape (N,1,H,W)
+    else:
+        masks_torchvision = None
+
+    # Pack into torchvision-like dict
+    result = {
+        "boxes": boxes,
+        "labels": labels,
+        "scores": scores,
+        "masks": masks_torchvision
+    }
+    return result
+
+
 
 def parse_args():
     """解析命令行参数"""
@@ -85,9 +123,12 @@ def main():
     device = torch.device(args.device)
     
     # 加载改进版Mask R-CNN模型
-    print("正在加载改进版Mask R-CNN v2模型...")
-    segmentation_model = torchvision.models.detection.maskrcnn_resnet50_fpn_v2(weights='DEFAULT')    
-    segmentation_model.eval().to(device)
+    print("正在加载Mask R-CNN...")
+    # segmentation_model = torchvision.models.detection.maskrcnn_resnet50_fpn_v2(weights='DEFAULT')    
+    # segmentation_model = torchvision.models.detection.maskrcnn_mobilenet_v3_large_fpn(weights='DEFAULT')
+    # segmentation_model.eval().to(device)
+
+    segmentation_model = build_predictor(device="cuda")
     
     # 初始化跟踪器
     print(f"初始化BotSort跟踪器，使用ReID权重: {args.reid_weights}")
@@ -103,16 +144,11 @@ def main():
     for ext in image_extensions:
         image_files.extend(list(Path(args.source).glob(f'*{ext}')))
         image_files.extend(list(Path(args.source).glob(f'*{ext.upper()}')))
-    
-    # 按文件名排序
     image_files = sorted(image_files)
     base_names = [f.name.split('.')[0] for f in image_files]
-    
     if not image_files:
         print(f"在 {args.source} 中未找到图片文件")
         return
-    
-    
     # 读取第一张图片获取图像尺寸
     first_img = cv2.imread(str(image_files[0]))
     img_height, img_width = first_img.shape[:2]
@@ -128,7 +164,17 @@ def main():
             (img_width, img_height)
         )
     
-    track_class = [1,2,3,4,6,7,8]
+
+    # 存储每个ID外观特征
+    appearance_instant = {}
+    appearance_ema = {}
+    frame_record = {}
+    area_record = {}
+    cls_record = {}
+    
+    
+
+    track_class = [0,1,2,3,4,5,6,7]  # 只跟踪这些类别，COCO类别ID
     # 处理每一张图片
     for idx, img_path in enumerate(tqdm(image_files, desc="处理图片")):
         # 读取图片
@@ -137,13 +183,12 @@ def main():
             print(f"无法读取图片 {img_path}")
             continue
         
-        # 将图片转换为tensor并移至设备
-        frame_tensor = torchvision.transforms.functional.to_tensor(im).unsqueeze(0).to(device)
+        # # 将图片转换为tensor并移至设备
+        # frame_tensor = torchvision.transforms.functional.to_tensor(im).unsqueeze(0).to(device)
         
         # 运行Mask R-CNN模型检测边界框和掩码
         with torch.no_grad():
-            results = segmentation_model(frame_tensor)[0]
-
+            results = detect_and_pack(segmentation_model, im)
             # 'box': (N,4) 每个目标的BB坐标
             # 'labels': (N,) 每个目标的类别标签
             # 'scores': (N,) 每个目标的置信度分数
@@ -157,15 +202,15 @@ def main():
         for i, score in enumerate(results['scores']):
             if score >= confidence_threshold:
                 # 提取边界框和分数
-                x1, y1, x2, y2 = results['boxes'][i].cpu().numpy()
-                conf = score.item()
-                cls = results['labels'][i].item()  
+                x1, y1, x2, y2 = results['boxes'][i]
+                conf = score
+                cls = results['labels'][i]
                 if cls not in track_class:
                     continue
                 dets.append([x1, y1, x2, y2, conf, cls])
                 
                 # 提取掩码并添加到列表
-                mask = results['masks'][i, 0].cpu().numpy()  # 使用第一个通道（二值掩码）
+                mask = results['masks'][i,0]# 使用第一个通道（二值掩码）
                 masks.append(mask)
         
         # 将检测结果转换为numpy数组 (N x (x, y, x, y, conf, cls))
@@ -176,7 +221,38 @@ def main():
         
         # 更新跟踪器
         tracks = tracker.update(dets, im) 
-        # tracks的格式为 M x (x1, y1, x2, y2, id, conf, cls, ind)
+        for t in tracker.active_tracks:
+            if t.is_activated:
+                track_id = t.id
+                # 现在可以安全地访问特征
+                curr_feat = t.curr_feat if hasattr(t, 'curr_feat') else None
+                smooth_feat = t.smooth_feat if hasattr(t, 'smooth_feat') else None
+                conf = t.conf if hasattr(t, 'conf') else None
+                if track_id not in appearance_instant:
+                    appearance_instant[track_id] = []
+                if track_id not in appearance_ema:
+                    appearance_ema[track_id] = []
+                if track_id not in area_record:
+                    area_record[track_id] = []
+                if track_id not in cls_record:
+                    cls_record[track_id] = []
+
+                appearance_instant[track_id].append(curr_feat)
+                appearance_ema[track_id].append(smooth_feat)
+                area_record[track_id].append(abs((t.xyxy[2]-t.xyxy[0])*(t.xyxy[3]-t.xyxy[1])))  # x2-x1 * y
+                cls_record[track_id].append(t.cls)  # 类别
+               
+
+                if track_id not in frame_record:
+                    frame_record[track_id] = [t.start_frame]
+                else:
+                    if len(frame_record[track_id])==1:
+                        frame_record[track_id].append(t.frame_id)
+                    else:
+                        frame_record[track_id][1] = t.frame_id
+
+
+                
         
 
         # id为某个对象的唯一标识符，通常是跟踪器分配的
@@ -189,8 +265,6 @@ def main():
         # 在单个循环中绘制分割掩码和边界框
         if len(tracks) > 0:
             inds = tracks[:, 7].astype('int')  # 获取跟踪索引为整数
-            
-            
             # 使用索引匹配跟踪和掩码
             if len(masks) > 0:
                 # 确保索引在有效范围内
@@ -212,7 +286,6 @@ def main():
                 
                 # 绘制分割掩码
                 if mask is not None:
-
                     # 二值化掩码，使用较低的阈值确保捕获更多细节
                     binary_mask = (mask > 0.5).astype(np.uint8)
                     # 检查二值化后的掩码中有多少像素被设置为1
@@ -273,7 +346,50 @@ def main():
         video_writer.release()
     
     cv2.destroyAllWindows()
-    print(f"处理完成。彩色结果保存在 {output_path}, npy掩码保存在 {npy_path}。")
+
+    assert len(appearance_instant) == len(appearance_ema) == len(area_record), "instant, ema 长度不一致"
+    max_id = max(appearance_instant.keys())
+    final_feature_dict = {
+        id: {
+            "instant": np.array(appearance_instant[id]).mean(axis=0) if len(appearance_instant[id]) > 0 else None,
+            "ema": np.array(appearance_ema[id]).mean(axis=0) if len(appearance_ema[id]) > 0 else None,
+            "area": np.array(area_record[id]).mean() if len(area_record[id]) > 0 else None,
+            "cls": max(set(cls_record[id]), key=cls_record[id].count) if len(cls_record[id]) > 0 else None
+        } for id in appearance_instant.keys()
+    }
+
+    feat_dim = 1280
+    instant_feat_np = np.zeros((max_id, feat_dim), dtype=np.float32)
+    ema_feat_np = np.zeros((max_id, feat_dim), dtype=np.float32)
+    frame_record_np = np.zeros((max_id, 4), dtype=np.int32)  # start_frame, end_frame, avg_area, cls
+    frame_record_np[:,-1] = -1  # cls初始化为-1，表示无效
+
+
+
+    for id in final_feature_dict.keys():
+        if final_feature_dict[id]['instant'] is not None:
+            instant_feat_np[id-1] = final_feature_dict[id]['instant']
+        if final_feature_dict[id]['ema'] is not None:
+            ema_feat_np[id-1] = final_feature_dict[id]['ema']
+        if id in frame_record:
+            frame_record_np[id-1][:2] = np.array(frame_record[id], dtype=np.int32)
+        if final_feature_dict[id]['area'] is not None:
+            frame_record_np[id-1][2] = final_feature_dict[id]['area']  
+        if id in cls_record:
+            frame_record_np[id-1][3] = final_feature_dict[id]['cls']
+        
+        
+
+    
+
+    
+    np.save(output_path / "instant_feat.npy", instant_feat_np)
+    np.save(output_path / "ema_feat.npy", ema_feat_np)
+    np.save(output_path / "frame_record.npy", frame_record_np)
+    
+    # print(f"处理完成。彩色结果保存在 {output_path}, npy掩码保存在 {npy_path}。")
+
+
 
 
 if __name__ == "__main__":

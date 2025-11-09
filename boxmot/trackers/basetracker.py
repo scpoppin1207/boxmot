@@ -156,7 +156,6 @@ class BaseTracker(ABC):
         """
         Decorator for the update method to handle per-class processing.
         """
-
         def wrapper(self, dets: np.ndarray, img: np.ndarray, embs: np.ndarray = None):
             # handle different types of inputs
             if dets is None or len(dets) == 0:

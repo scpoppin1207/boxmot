@@ -25,11 +25,6 @@ import cv2
 import torch
 import sys
 
-# 添加 Depth-Anything-V2 模块的上级目录到 sys.path
-depth_module_path = '/home/scp_recon/thirdparty/Depth-Anything-V2'
-if depth_module_path not in sys.path:
-    sys.path.insert(0, depth_module_path)
-from depth_anything_v2.dpt import DepthAnythingV2
 
 
 def parse_args():
@@ -106,6 +101,7 @@ def process_image(image_path, segmentation_model, device, conf_thres):
     # 运行Mask R-CNN模型检测边界框和掩码
     with torch.no_grad():
         results = segmentation_model(frame_tensor)[0]
+        # ['boxes', 'labels', 'scores', 'masks']
     
     # 提取分割结果
     dets = []
@@ -173,44 +169,6 @@ def create_tracking_mask(tracks, masks, image_shape):
     return track_mask, track_info
 
 
-def calculate_bbox_iou(bbox1, bbox2):
-    """计算两个边界框的IoU
-    
-    Args:
-        bbox1, bbox2: [x1, y1, x2, y2] 格式的边界框
-    
-    Returns:
-        iou: 边界框IoU值
-    """
-    x1_1, y1_1, x2_1, y2_1 = bbox1
-    x1_2, y1_2, x2_2, y2_2 = bbox2
-    
-    # 计算交集区域
-    x1_inter = max(x1_1, x1_2)
-    y1_inter = max(y1_1, y1_2)
-    x2_inter = min(x2_1, x2_2)
-    y2_inter = min(y2_1, y2_2)
-    
-    # 检查是否有交集
-    if x2_inter <= x1_inter or y2_inter <= y1_inter:
-        return 0.0
-    
-    # 计算交集面积
-    intersection_area = (x2_inter - x1_inter) * (y2_inter - y1_inter)
-    
-    # 计算两个边界框的面积
-    bbox1_area = (x2_1 - x1_1) * (y2_1 - y1_1)
-    bbox2_area = (x2_2 - x1_2) * (y2_2 - y1_2)
-    
-    # 计算并集面积
-    union_area = bbox1_area + bbox2_area - intersection_area
-    
-    # 计算IoU
-    iou = intersection_area / union_area if union_area > 0 else 0.0
-    
-    return iou
-
-
 def calculate_motion_metrics(bbox1, bbox2):
     """计算更敏感的运动指标
     
@@ -243,21 +201,15 @@ def calculate_motion_metrics(bbox1, bbox2):
     area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
     area_change_ratio = abs(area2 - area1) / area1 if area1 > 0 else 0
     
-    # 3. 宽高比变化
-    aspect_ratio1 = (x2_1 - x1_1) / (y2_1 - y1_1) if (y2_1 - y1_1) > 0 else 0
-    aspect_ratio2 = (x2_2 - x1_2) / (y2_2 - y1_2) if (y2_2 - y1_2) > 0 else 0
-    aspect_ratio_change = abs(aspect_ratio2 - aspect_ratio1)
-    if aspect_ratio_change > 0.15:
-        return None
     
     
-    # 4. 各边位移的标准差（形状变化指标）
+    # 3. 各边位移的标准差（形状变化指标）
     edges1 = np.array([x1_1, y1_1, x2_1, y2_1])
     edges2 = np.array([x1_2, y1_2, x2_2, y2_2])
     edge_displacements = np.abs(edges2 - edges1)
     shape_variance = np.std(edge_displacements)
     
-    # 5. 运动强度分数（综合指标）
+    # 4. 运动强度分数（综合指标）
     # 归一化各个指标并加权组合
     bbox_size = np.sqrt(area1)  # 用于归一化位移
     normalized_displacement = center_displacement / bbox_size if bbox_size > 0 else 0
@@ -482,29 +434,6 @@ def create_id_mapping(mask_A, mask_B, min_iou=0.5):
     
     return mapping_dict
 
-def load_intrinsic_matrix(all_calib_path):
-    Ks = [] #cam0 的内参矩阵列表
-    print(f"加载相机内参文件: {all_calib_path}")
-    calib_paths = os.listdir(all_calib_path)
-    calib_paths = [c for c in calib_paths if c.endswith('.txt')]
-    calib_paths = sorted(calib_paths, key=lambda x: int(x.split('.')[0]))  # 按照文件名中的数字排序
-    for calib_file in calib_paths:
-        with open(os.path.join(all_calib_path, calib_file)) as f:
-            calib_data = f.readlines()
-            L = [list(map(float, line.split()[1:])) for line in calib_data]
-            K_all_cam = np.array(L[:5]).reshape(-1, 3, 4)[:, :, :3]  # 相机内参旋转矩阵
-            Ks.append(K_all_cam[0])
-    Ks = np.array(Ks)  # 转换为numpy数组 # (N, 3, 3)
-    return Ks
-
-
-
-    # with open(os.path.join(args.source_path, 'calib', car_id + '.txt')) as f:
-    #             calib_data = f.readlines()
-    #             L = [list(map(float, line.split()[1:])) for line in calib_data] # 长度为行数，每行12个float元素
-
-    #         Ks = np.array(L[:5]).reshape(-1, 3, 4)[:, :, :3] # 相机内参旋转矩阵
-
 def main():
     """主函数"""
     args = parse_args()
@@ -522,24 +451,6 @@ def main():
         device = torch.device(args.device)
     
 
-#     model_configs = {
-#         'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
-#         'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
-#         'vitl': {'encoder': 'vitl', 'featu(es': 256, 'out_channels'
-# : [256, 512, 1024, 1024]},
-#         'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
-#     }
-
-#     encoder = 'vitl' # or 'vits', 'vitb', 'vitg'
-
-    # depth_model = DepthAnythingV2(**model_configs[encoder])
-    # depth_model.load_state_dict(torch.load(f'/Depth-Anything-V2/checkpoints/depth_anything_v2_{encoder}.pth', map_location='cpu'))
-    # depth_model = depth_model.to(device).eval()
-    # print(f"成功加载Depth Anything V2模型，编码器: {encoder}")
-
-    # raw_img = cv2.imread('your/image/path')
-    # depth = model.infer_image(raw_img) # HxW raw depth map in numpy
-    
     # 加载Mask R-CNN模型
     segmentation_model = torchvision.models.detection.maskrcnn_resnet50_fpn_v2(weights='DEFAULT')    
     segmentation_model.eval().to(device)
@@ -555,7 +466,7 @@ def main():
     
     for wrap_dir in mapping_list:
         # wrap_dir = "wrap_*"
-        image_pairs = find_image_pairs(os.path.join(args.source, wrap_dir),args.cam)
+        image_pairs = find_image_pairs(os.path.join(args.source, wrap_dir),args.cam)[:2]
         # N * (gt_path, wrap_path, frame_id, cam_id)
         
         if not image_pairs:
@@ -625,8 +536,11 @@ def main():
             
             # 将腐蚀后的掩码应用到rgb_diff
             # rgb_diff = rgb_diff * binary_mask_eroded
+            if not common_ids:
+                print(f"在GT帧和Wrap帧中没有共同的ID，跳过动态积分计算")
+                continue
             
-            if common_ids:
+            else:
                 # print(f"在两帧都出现的ID: {sorted(common_ids)}")
                 
                 # 计算每个共同ID的运动指标
@@ -639,8 +553,6 @@ def main():
 
                     gt_bbox = get_bbox_by_track_id(gt_tracks_filtered, track_id)
                     wrap_bbox = get_bbox_by_track_id(wrap_tracks_filtered, track_id)
-
-
                    
                     
                     x1_1, y1_1, x2_1, y2_1 = gt_bbox
@@ -654,11 +566,8 @@ def main():
                         print(f"  ID {track_id}: 边界框突变，跳过计算")
                         continue
 
-                    motion_intensity_1 = calculate_motion_metrics(gt_bbox, wrap_bbox)
-                    # if motion_intensity_1 is not None:
-                    #     pair_metrics[track_id] = motion_intensity_1
-                    #     pair_metrics_count[track_id] = pair_metrics_count.get(track_id, 0) + 1
-
+                    motion_intensity_1 = calculate_motion_metrics(gt_bbox, wrap_bbox)  # 基于边界框的运动强度
+                    # motion_intensity_1 = 0
 
                     
                     if gt_mask is not None and wrap_mask is not None:
@@ -790,7 +699,7 @@ def main():
     final_scores = []  # 存储最终得分列表
     for track_id, score in sorted(seq_ID_score.items()):
         # 至少被观测到6次以上
-        if seq_ID_score_count.get(track_id, 1) > 6:
+        if seq_ID_score_count.get(track_id, 1) > 3:
             final_scores.append((track_id, score / seq_ID_score_count.get(track_id, 1)))
     final_scores.sort(key=lambda x: x[1], reverse=True)
     for track_id, score in final_scores:

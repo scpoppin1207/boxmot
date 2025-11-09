@@ -158,6 +158,7 @@ class BotSort(BaseTracker):
         )
 
         # Update lost and removed tracks
+        # move expire lost tracks to removed stracks
         self._update_track_states(lost_stracks, removed_stracks)
 
         # Merge and prepare output
@@ -166,7 +167,7 @@ class BotSort(BaseTracker):
         )
 
     def _split_detections(self, dets, embs):
-        dets = np.hstack([dets, np.arange(len(dets)).reshape(-1, 1)])
+        dets = np.hstack([dets, np.arange(len(dets)).reshape(-1, 1)]) # (N,6)->(N,7)  最后一列为索引 x y x y conf cls ind
         confs = dets[:, 4]
         second_mask = np.logical_and(
             confs > self.track_low_thresh, confs < self.track_high_thresh
@@ -233,9 +234,14 @@ class BotSort(BaseTracker):
         else:
             dists = ious_dists
 
+        ## 从这开始 
+        # TODO： 1. 返回所有ST的外观嵌入
+        #       2.设计时间窗口算法进行视角间关联
+
+
         matches, u_track, u_detection = linear_assignment(
             dists, thresh=self.match_thresh
-        )
+        ) # hungarian algorithm
 
         for itracked, idet in matches:
             track = strack_pool[itracked]
@@ -401,9 +407,8 @@ class BotSort(BaseTracker):
         self.active_tracks, self.lost_stracks = remove_duplicate_stracks(
             self.active_tracks, self.lost_stracks
         )
-
         outputs = [
-            [*t.xyxy, t.id, t.conf, t.cls, t.det_ind]
+            [*t.xyxy, t.id, t.conf, t.cls, t.det_ind, t.start_frame, t.frame_id]
             for t in self.active_tracks
             if t.is_activated
         ]

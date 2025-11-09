@@ -27,7 +27,7 @@ class STrack(BaseTrack):
         # Classification history and feature history
         self.cls_hist = []
         self.history_observations = deque(maxlen=self.max_obs)
-        self.features = deque(maxlen=feat_history)
+        self.features = deque(maxlen=feat_history)  # deque的意思是双端队列
         self.smooth_feat = None
         self.curr_feat = None
         self.alpha = 0.9
